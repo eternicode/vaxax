@@ -1,0 +1,104 @@
+#!/usr/bin/env python
+
+import os, sys, subprocess as sp, tempfile, re
+from os import path
+
+backups = {
+    # name: (source_uuid, target_uuid),
+}
+
+def run(cmd, input=None):
+    p = sp.Popen(cmd.split(), stdout=sp.PIPE, stderr=sp.PIPE, stdin=sp.PIPE)
+    return p.communicate(input) + (p.wait(),)
+
+def uuid_to_dev(uuid):
+    if path.exists('/dev/disk/by-uuid/'+uuid):
+        return path.realpath('/dev/disk/by-uuid/'+uuid)
+
+def mountpoint(dev):
+    mounts = dict(re.findall(r'(\S+) on (\S+)', x)[0] for x in run('mount')[0].splitlines())
+    return mounts.get(dev)
+
+def backup(name, from_uuid, to_uuid):
+    mount1 = tempfile.mkdtemp(prefix='bak.').rstrip('/')
+    mount2 = tempfile.mkdtemp(prefix='bak.').rstrip('/')
+
+    from_dev = uuid_to_dev(from_uuid)
+    to_dev = uuid_to_dev(to_uuid)
+
+    if not from_dev:
+        print >>sys.stderr, 'Source device for "%s" (%s) not found.' % (name, from_uuid)
+    if not to_dev:
+        print >>sys.stderr, 'Destination device for "%s" (%s) not found.' % (name, to_uuid)
+
+    if mountpoint(from_dev):
+        print '%s @ %s' % (from_dev, mountpoint(from_dev))
+        os.rmdir(mount1)
+        mount1 = None
+    else:
+        cmd = 'mount %s %s' % (from_dev, mount1+'/')
+        print cmd
+        o,e,r = run(cmd)
+        if r:
+            print >>sys.stderr, 'Error mounting "%s" (%s : %s).' % (name, from_dev, from_uuid)
+            print >>sys.stderr, '\n'.join(['='*10, e.strip(), '='*10])
+            return
+
+    if mountpoint(to_dev):
+        print '%s @ %s' % (to_dev, mountpoint(to_dev))
+        os.rmdir(mount2)
+        mount2 = None
+    else:
+        cmd = 'mount %s %s' % (to_dev, mount2+'/')
+        print cmd
+        o,e,r = run(cmd)
+        if r:
+            print >>sys.stderr, 'Error mounting "%s" (%s : %s).' % (name, to_dev, to_uuid)
+            print >>sys.stderr, '\n'.join(['='*10, e.strip(), '='*10])
+            return
+
+    cmd = (
+      'rsync -vaxAX --delete --ignore-errors %s %s'
+      % ( (mount1 or mountpoint(from_dev)).rstrip('/') + '/',
+          (mount2 or mountpoint(to_dev)).rstrip('/') + '/',  )
+    )
+
+    print cmd
+    sync_out,sync_err,r = run(cmd)
+
+    if mount1:
+      cmd = 'umount %s' % mount1
+      print cmd
+      o,e,r = run(cmd)
+      if r:
+          print >>sys.stderr, 'Error unmounting "%s" @ %s (%s : %s).' % (name, mount1, from_dev, from_uuid)
+          print >>sys.stderr, '\n'.join(['='*10, e.strip(), '='*10])
+      else:
+        os.rmdir(mount1)
+
+    if mount2:
+      cmd = 'umount %s' % mount2
+      print cmd
+      o,e,r = run(cmd)
+      if r:
+          print >>sys.stderr, 'Error unmounting "%s" @ %s (%s : %s).' % (name, mount1, from_dev, from_uuid)
+          print >>sys.stderr, '\n'.join(['='*10, e.strip(), '='*10])
+      else:
+        os.rmdir(mount2)
+
+    if sync_out:
+        print "== out ==="
+        print sync_out.strip()
+        print '='*10
+
+    if sync_err:
+        print "== err ==="
+        print sync_err.strip()
+        print '='*10
+
+
+if __name__ == '__main__':
+    for name, (from_uuid, to_uuid) in backups.items():
+      print '%s: %s -> %s' % (name, from_uuid, to_uuid)
+      backup(name, from_uuid, to_uuid)
+      print ''
